@@ -1,0 +1,9 @@
+.downloads/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python-version
+/archive
+/archive.exe
+cmd/archive/archive.exe
