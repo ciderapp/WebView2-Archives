@@ -35,6 +35,14 @@ var (
 	cabNameRe      = regexp.MustCompile(`(?i)^Microsoft\.WebView2\.FixedVersionRuntime\.(?P<version>\d+(?:\.\d+){3})\.(?P<arch>x86|x64|arm64)\.cab$`)
 )
 
+const (
+	releaseConcurrency = 5
+	uploadConcurrency  = 8
+	aria2MaxConcurrent = 16
+)
+
+var uploadSlots = make(chan struct{}, uploadConcurrency)
+
 type catalogEntry struct {
 	Version string  `json:"version"`
 	Builds  []build `json:"builds"`
@@ -122,6 +130,7 @@ func run() error {
 		already   map[string]ghAsset
 		dir       string
 		artifacts []artifact
+		sidecar   []string
 	}
 
 	var pending []pendingVersion
@@ -214,21 +223,64 @@ func run() error {
 		}
 	}
 
-	archivedAny := false
-	for i := range pending {
-		item := &pending[i]
-		if err := finalizeArtifacts(item.artifacts); err != nil {
+	archivedAny := len(pending) > 0
+	if archivedAny {
+		indexes := make([]int, len(pending))
+		for i := range indexes {
+			indexes[i] = i
+		}
+		if err := parallelDo(len(pending), indexes, func(i int) error {
+			if err := finalizeArtifacts(pending[i].artifacts); err != nil {
+				return err
+			}
+			sortArtifacts(pending[i].artifacts)
+			sumsPath, sourcePath, err := writeSidecarFiles(pending[i].dir, pending[i].entry.Version, pending[i].artifacts)
+			if err != nil {
+				return err
+			}
+			pending[i].sidecar = []string{sumsPath, sourcePath}
+			return nil
+		}); err != nil {
 			return err
 		}
-		sortArtifacts(item.artifacts)
-		sumsPath, sourcePath, err := writeSidecarFiles(item.dir, item.entry.Version, item.artifacts)
+
+		pendingTags := make([]string, len(pending))
+		for i := range pending {
+			pendingTags[i] = pending[i].entry.Version
+		}
+		upcoming, err := upcomingLatest(published, pendingTags)
 		if err != nil {
 			return err
 		}
-		if err := createOrUpdateRelease(repo, item.entry.Version, item.artifacts, []string{sumsPath, sourcePath}, false); err != nil {
+		type publishJob struct {
+			version   string
+			artifacts []artifact
+			sidecar   []string
+			extra     []string
+		}
+		jobs := make([]publishJob, 0, len(pending))
+		for i := range pending {
+			item := &pending[i]
+			extra := []string{}
+			if item.entry.Version == upcoming {
+				extra, err = writeLatestAliasFiles(downloadRoot, item.entry.Version, item.artifacts)
+				if err != nil {
+					return err
+				}
+			}
+			jobs = append(jobs, publishJob{
+				version:   item.entry.Version,
+				artifacts: item.artifacts,
+				sidecar:   item.sidecar,
+				extra:     extra,
+			})
+		}
+		log.Printf("Publishing %d release(s) with up to %d parallel uploads", len(jobs), uploadConcurrency)
+		if err := parallelDo(releaseConcurrency, jobs, func(job publishJob) error {
+			return createOrUpdateRelease(repo, job.version, job.artifacts, job.sidecar, job.extra, false)
+		}); err != nil {
 			return err
 		}
-		archivedAny = true
 	}
 
 	local := map[string][]artifact{}
@@ -392,9 +444,16 @@ func downloadWithAria2(downloadRoot string, jobs []downloadJob) error {
 		return err
 	}
 
+	concurrent := len(jobs)
+	if concurrent < 1 {
+		concurrent = 1
+	}
+	if concurrent > aria2MaxConcurrent {
+		concurrent = aria2MaxConcurrent
+	}
 	args := []string{
 		"--input-file=" + inputPath,
-		"--max-concurrent-downloads=6",
+		fmt.Sprintf("--max-concurrent-downloads=%d", concurrent),
 		"--max-connection-per-server=16",
 		"--split=16",
 		"--min-split-size=8M",
@@ -544,7 +603,7 @@ func releaseNotes(version string, artifacts []artifact) string {
 	return b.String()
 }
 
-func createOrUpdateRelease(repo, version string, artifacts []artifact, sidecar []string, makeLatest bool) error {
+func createOrUpdateRelease(repo, version string, artifacts []artifact, sidecar, extra []string, makeLatest bool) error {
 	notesPath := filepath.Join(filepath.Dir(sidecar[0]), "RELEASE_NOTES.md")
 	if err := os.WriteFile(notesPath, []byte(releaseNotes(version, artifacts)), 0o644); err != nil {
 		return err
@@ -556,6 +615,7 @@ func createOrUpdateRelease(repo, version string, artifacts []artifact, sidecar [
 		}
 	}
 	files = append(files, sidecar...)
+	files = append(files, extra...)
 
 	view := exec.Command("gh", "release", "view", version, "--repo", repo)
 	if token := ghToken(); token != "" {
@@ -573,26 +633,137 @@ func createOrUpdateRelease(repo, version string, artifacts []artifact, sidecar [
 		} else {
 			args = append(args, "--latest=false")
 		}
-		args = append(args, files...)
 		log.Printf("Creating release %s", version)
-		return runGHStream(args...)
+		if err := runGHStream(args...); err != nil {
+			return err
+		}
+	} else {
+		log.Printf("Updating existing release %s", version)
+		edit := []string{
+			"release", "edit", version,
+			"--repo", repo,
+			"--title", "WebView2 Fixed Version " + version,
+			"--notes-file", notesPath,
+		}
+		if makeLatest {
+			edit = append(edit, "--latest")
+		}
+		if err := runGHStream(edit...); err != nil {
+			return err
+		}
 	}
+	return uploadReleaseFiles(repo, version, files)
+}
 
-	log.Printf("Updating existing release %s", version)
-	edit := []string{
-		"release", "edit", version,
-		"--repo", repo,
-		"--title", "WebView2 Fixed Version " + version,
-		"--notes-file", notesPath,
+func uploadReleaseFiles(repo, version string, files []string) error {
+	if len(files) == 0 {
+		return nil
 	}
-	if makeLatest {
-		edit = append(edit, "--latest")
+	return parallelDo(len(files), files, func(path string) error {
+		uploadSlots <- struct{}{}
+		defer func() { <-uploadSlots }()
+		log.Printf("  Uploading %s -> %s", filepath.Base(path), version)
+		return runGHStream("release", "upload", version, "--repo", repo, "--clobber", path)
+	})
+}
+
+func upcomingLatest(published map[string]*ghRelease, pending []string) (string, error) {
+	var tags []string
+	for tag, rel := range published {
+		if _, err := parseVersion(tag); err != nil {
+			continue
+		}
+		if len(cabAssets(rel)) == 0 {
+			continue
+		}
+		tags = append(tags, tag)
 	}
-	if err := runGHStream(edit...); err != nil {
-		return err
+	tags = append(tags, pending...)
+	if len(tags) == 0 {
+		return "", fmt.Errorf("no versions available to mark as latest")
 	}
-	upload := append([]string{"release", "upload", version, "--repo", repo, "--clobber"}, files...)
-	return runGHStream(upload...)
+	sort.Slice(tags, func(i, j int) bool {
+		return versionLess(tags[i], tags[j])
+	})
+	return tags[len(tags)-1], nil
+}
+
+func writeLatestAliasFiles(downloadRoot, version string, artifacts []artifact) ([]string, error) {
+	sources := map[string]string{}
+	for _, art := range artifacts {
+		if art.Path != "" {
+			if _, err := os.Stat(art.Path); err == nil {
+				sources[art.Architecture] = art.Path
+			}
+		}
+	}
+	aliasDir := filepath.Join(downloadRoot, "latest-aliases")
+	if err := os.MkdirAll(aliasDir, 0o755); err != nil {
+		return nil, err
+	}
+	versionFile := filepath.Join(aliasDir, "latest-version.txt")
+	if err := os.WriteFile(versionFile, []byte(version+"\n"), 0o644); err != nil {
+		return nil, err
+	}
+	files := []string{versionFile}
+	for _, arch := range expectedArches {
+		src := sources[arch]
+		if src == "" {
+			return nil, fmt.Errorf("missing %s cabinet while preparing latest aliases", arch)
+		}
+		for _, name := range []string{
+			arch + ".cab",
+			"Microsoft.WebView2.FixedVersionRuntime." + arch + ".cab",
+		} {
+			dst := filepath.Join(aliasDir, name)
+			if err := linkOrCopy(src, dst); err != nil {
+				return nil, err
+			}
+			files = append(files, dst)
+		}
+	}
+	return files, nil
+}
+
+func linkOrCopy(src, dst string) error {
+	_ = os.Remove(dst)
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	return copyFile(src, dst)
+}
+
+func parallelDo[T any](limit int, items []T, fn func(T) error) error {
+	if len(items) == 0 {
+		return nil
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	sem := make(chan struct{}, limit)
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		first error
+	)
+	for _, item := range items {
+		item := item
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := fn(item); err != nil {
+				mu.Lock()
+				if first == nil {
+					first = err
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return first
 }
 
 func markLatest(repo, version string) error {
@@ -732,7 +903,7 @@ func ensureLatestAliases(repo, downloadRoot, version string, local []artifact) e
 			"Microsoft.WebView2.FixedVersionRuntime." + arch + ".cab",
 		} {
 			dst := filepath.Join(aliasDir, name)
-			if err := copyFile(src, dst); err != nil {
+			if err := linkOrCopy(src, dst); err != nil {
 				return err
 			}
 			toUpload = append(toUpload, dst)
@@ -740,8 +911,7 @@ func ensureLatestAliases(repo, downloadRoot, version string, local []artifact) e
 	}
 
 	log.Printf("Uploading stable latest aliases for %s", version)
-	args := append([]string{"release", "upload", version, "--repo", repo, "--clobber"}, toUpload...)
-	return runGHStream(args...)
+	return uploadReleaseFiles(repo, version, toUpload)
 }
 
 func copyFile(src, dst string) error {

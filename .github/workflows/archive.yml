@@ -30,10 +30,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y aria2
 
       - name: Archive new versions
+        timeout-minutes: 120
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: go run ./cmd/archive
+        run: go build -o /tmp/webview2-archive ./cmd/archive && /tmp/webview2-archive
 
       - name: Commit catalog index
         run: |

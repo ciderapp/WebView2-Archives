@@ -102,8 +102,8 @@ See Microsoft's [Fixed Version distribution](https://learn.microsoft.com/en-us/m
 
 After each archive run the workflow updates two files on `main`:
 
-- [`catalog.json`](catalog.json) — every archived version
-- [`latest.json`](latest.json) — the newest archived version, plus `/releases/latest/download` permalinks
+- [`catalog.json`](catalog.json): every archived version
+- [`latest.json`](latest.json): the newest archived version, plus `/releases/latest/download` permalinks
 
 Raw URLs:
 
@@ -157,8 +157,8 @@ Prefer Microsoft's page whenever the version you need is still listed there.
    - `https://developer.microsoft.com/microsoft-edge/api/webview2`
    - fallback `https://explore.microsoft.com/microsoft-edge/api/webview2`
 3. Versions that already have a GitHub Release are skipped.
-4. Missing cabinets across versions are downloaded in one [aria2](https://aria2.github.io/) session (16 connections per file, up to 6 files at once, resume enabled), then checksummed in parallel.
-5. GitHub Releases are published oldest-first. The highest archived version is marked as GitHub’s **latest** release and given stable aliases (`x64.cab`, `x86.cab`, `arm64.cab`) so `/releases/latest/download/x64.cab` always follows the newest archive.
+4. Missing cabinets across versions are downloaded in one [aria2](https://aria2.github.io/) session (16 connections per file, up to 16 files at once, resume enabled), then checksummed in parallel.
+5. GitHub Releases are created in parallel. Cabinet uploads share a pool of 8 connections so multiple versions ship at once. The highest archived version is marked as GitHub’s **latest** release and given stable aliases (`x64.cab`, `x86.cab`, `arm64.cab`) during that same publish so `/releases/latest/download/x64.cab` always follows the newest archive.
 6. `catalog.json` and `latest.json` are rebuilt from this repo's releases.
 
 ## Disclaimer
@@ -167,7 +167,7 @@ This is an **unofficial archive**. It is not affiliated with, endorsed by, or sp
 
 Microsoft, Microsoft Edge, WebView2, and related marks are trademarks of Microsoft Corporation. This project does not claim any ownership of those marks or of the WebView2 runtime.
 
-The `.cab` files attached to GitHub Releases are **Microsoft software**. Downloading or using them remains subject to Microsoft's license terms and EULA. The MIT license in this repository covers only our scripts, workflows, and documentation — not Microsoft binaries.
+The `.cab` files attached to GitHub Releases are **Microsoft software**. Downloading or using them remains subject to Microsoft's license terms and EULA. The MIT license in this repository covers only our scripts, workflows, and documentation, not Microsoft binaries.
 
 Packages are provided as-is, with no warranty. Use at your own risk.
 
