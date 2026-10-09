@@ -1,7 +1,36 @@
 {
-  "generated_at": "2026-10-08T18:37:16Z",
-  "latest": "154.0.4258.62",
+  "generated_at": "2026-10-09T01:11:15Z",
+  "latest": "155.0.4283.45",
   "releases": [
+    {
+      "version": "155.0.4283.45",
+      "tag": "155.0.4283.45",
+      "html_url": "https://github.com/ciderapp/WebView2-Archives/releases/tag/155.0.4283.45",
+      "published_at": "2026-10-09T01:10:54Z",
+      "assets": [
+        {
+          "architecture": "x86",
+          "filename": "Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x86.cab",
+          "size": 268649207,
+          "sha256": "b7b5b023e6ae74403416d8b1340fec63e3ee7903048bce548a8974f2e445a635",
+          "browser_download_url": "https://github.com/ciderapp/WebView2-Archives/releases/download/155.0.4283.45/Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x86.cab"
+        },
+        {
+          "architecture": "x64",
+          "filename": "Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x64.cab",
+          "size": 310544938,
+          "sha256": "ec533bf1b7354d288703cf821a2d640d0130108224f93e330bb9c09faf3f8010",
+          "browser_download_url": "https://github.com/ciderapp/WebView2-Archives/releases/download/155.0.4283.45/Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x64.cab"
+        },
+        {
+          "architecture": "arm64",
+          "filename": "Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.arm64.cab",
+          "size": 295741850,
+          "sha256": "09ff642359ad9a9e53ecd268d77c45255b59232478e6da1705b3315b3efa6ae2",
+          "browser_download_url": "https://github.com/ciderapp/WebView2-Archives/releases/download/155.0.4283.45/Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.arm64.cab"
+        }
+      ]
+    },
     {
       "version": "154.0.4258.62",
       "tag": "154.0.4258.62",
