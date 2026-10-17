@@ -1,0 +1,108 @@
+name: Repack WebView2 (manual, unofficial)
+
+# Manual only. There is deliberately no schedule. See README "Manual repacks".
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Runtime version, for example 156.0.4314.30"
+        required: true
+      channel:
+        description: "Edge channel of the package (stable, beta, dev, canary)"
+        required: true
+        default: beta
+      x64_url:
+        description: "x64 full package URL from the Edge update API (optional)"
+        required: false
+      x64_sha256:
+        description: "x64 full package SHA256 (hex)"
+        required: false
+      x86_url:
+        description: "x86 full package URL (optional)"
+        required: false
+      x86_sha256:
+        description: "x86 full package SHA256 (hex)"
+        required: false
+      arm64_url:
+        description: "arm64 full package URL (optional)"
+        required: false
+      arm64_sha256:
+        description: "arm64 full package SHA256 (hex)"
+        required: false
+      publish:
+        description: "Publish a GitHub prerelease (leave off for a dry run)"
+        type: boolean
+        default: false
+      acknowledge_license_risk:
+        description: "I have read the license risk notes in the README"
+        type: boolean
+        default: false
+
+concurrency:
+  group: archive-webview2
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install 7-Zip and gcab
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full gcab
+          command -v 7z || sudo ln -s "$(command -v 7zz)" /usr/local/bin/7z
+          7z | head -2
+          gcab --version
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Repack
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_CHANNEL: ${{ inputs.channel }}
+          IN_X64_URL: ${{ inputs.x64_url }}
+          IN_X64_SHA: ${{ inputs.x64_sha256 }}
+          IN_X86_URL: ${{ inputs.x86_url }}
+          IN_X86_SHA: ${{ inputs.x86_sha256 }}
+          IN_ARM64_URL: ${{ inputs.arm64_url }}
+          IN_ARM64_SHA: ${{ inputs.arm64_sha256 }}
+          IN_PUBLISH: ${{ inputs.publish }}
+          IN_ACK: ${{ inputs.acknowledge_license_risk }}
+        run: |
+          set -euo pipefail
+          go build -o /tmp/webview2-archive ./cmd/archive
+          args=(repack -version "$IN_VERSION" -channel "$IN_CHANNEL" -out "$RUNNER_TEMP/repack")
+          [ -n "$IN_X64_URL" ] && args+=(-x64-url "$IN_X64_URL" -x64-sha256 "$IN_X64_SHA")
+          [ -n "$IN_X86_URL" ] && args+=(-x86-url "$IN_X86_URL" -x86-sha256 "$IN_X86_SHA")
+          [ -n "$IN_ARM64_URL" ] && args+=(-arm64-url "$IN_ARM64_URL" -arm64-sha256 "$IN_ARM64_SHA")
+          if [ "$IN_PUBLISH" = "true" ]; then
+            args+=(-publish)
+            [ "$IN_ACK" = "true" ] && args+=(-acknowledge-license-risk)
+          fi
+          /tmp/webview2-archive "${args[@]}"
+
+      - name: Keep checksums and source.json from the run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repack-metadata
+          path: |
+            ${{ runner.temp }}/repack/*/SHA256SUMS.txt
+            ${{ runner.temp }}/repack/*/source.json
+            ${{ runner.temp }}/repack/*/RELEASE_NOTES.md
+          if-no-files-found: ignore

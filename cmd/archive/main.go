@@ -57,7 +57,19 @@ type ghRelease struct {
 	TagName     string    `json:"tag_name"`
 	HTMLURL     string    `json:"html_url"`
 	PublishedAt string    `json:"published_at"`
+	Prerelease  bool      `json:"prerelease"`
 	Assets      []ghAsset `json:"assets"`
+}
+
+// officialRelease reports whether a release is a normal Fixed Version
+// archive. Manual repacks (prereleases with an -evergreen- tag) never count
+// toward latest, the latest aliases, catalog "latest" or latest.json.
+func officialRelease(tag string, rel *ghRelease) bool {
+	if rel == nil || rel.Prerelease || isRepackTag(tag) {
+		return false
+	}
+	_, err := parseVersion(tag)
+	return err == nil
 }
 
 type ghAsset struct {
@@ -83,6 +95,12 @@ type downloadJob struct {
 
 func main() {
 	log.SetFlags(0)
+	if len(os.Args) > 1 && os.Args[1] == "repack" {
+		if err := runRepack(os.Args[2:]); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("error: %v", err)
 	}
@@ -670,7 +688,7 @@ func uploadReleaseFiles(repo, version string, files []string) error {
 func upcomingLatest(published map[string]*ghRelease, pending []string) (string, error) {
 	var tags []string
 	for tag, rel := range published {
-		if _, err := parseVersion(tag); err != nil {
+		if !officialRelease(tag, rel) {
 			continue
 		}
 		if len(cabAssets(rel)) == 0 {
@@ -774,7 +792,7 @@ func markLatest(repo, version string) error {
 func newestArchived(releases map[string]*ghRelease) (string, *ghRelease, error) {
 	var tags []string
 	for tag, rel := range releases {
-		if _, err := parseVersion(tag); err != nil {
+		if !officialRelease(tag, rel) {
 			continue
 		}
 		if len(cabAssets(rel)) == 0 {
@@ -954,9 +972,26 @@ func rebuildIndexes(root, repo string) (bool, error) {
 		PublishedAt string     `json:"published_at"`
 		Assets      []assetOut `json:"assets"`
 	}
+	type prereleaseOut struct {
+		releaseOut
+		Kind       string `json:"kind"`
+		Channel    string `json:"channel,omitempty"`
+		Prerelease bool   `json:"prerelease"`
+	}
 	var entries []releaseOut
+	var prereleases []prereleaseOut
 	for tag, release := range published {
-		if _, err := parseVersion(tag); err != nil {
+		repack := isRepackTag(tag)
+		version := tag
+		channel := ""
+		if repack {
+			parts := strings.SplitN(tag, repackTagSeparator, 2)
+			version, channel = parts[0], parts[1]
+		}
+		if _, err := parseVersion(version); err != nil {
+			continue
+		}
+		if !repack && release.Prerelease {
 			continue
 		}
 		hashes := hashesFromRelease(*release)
@@ -980,16 +1015,29 @@ func rebuildIndexes(root, repo string) (bool, error) {
 		if len(assets) == 0 {
 			continue
 		}
-		entries = append(entries, releaseOut{
-			Version:     tag,
+		out := releaseOut{
+			Version:     version,
 			Tag:         tag,
 			HTMLURL:     release.HTMLURL,
 			PublishedAt: release.PublishedAt,
 			Assets:      assets,
-		})
+		}
+		if repack {
+			// Kept in a separate list so consumers reading "releases" (Rise)
+			// never see a repack unless an operator pins its URLs.
+			prereleases = append(prereleases, prereleaseOut{releaseOut: out, Kind: repackKind, Channel: channel, Prerelease: true})
+			continue
+		}
+		entries = append(entries, out)
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		return !versionLess(entries[i].Version, entries[j].Version)
+	})
+	sort.Slice(prereleases, func(i, j int) bool {
+		if prereleases[i].Version != prereleases[j].Version {
+			return !versionLess(prereleases[i].Version, prereleases[j].Version)
+		}
+		return prereleases[i].Tag < prereleases[j].Tag
 	})
 
 	generatedAt := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
@@ -1005,6 +1053,9 @@ func rebuildIndexes(root, repo string) (bool, error) {
 		"source":       catalogPrimary,
 		"latest":       latestVersion,
 		"releases":     entries,
+	}
+	if len(prereleases) > 0 {
+		catalog["prereleases"] = prereleases
 	}
 	permalinks := map[string]string{}
 	if latestVersion != "" {
@@ -1172,6 +1223,14 @@ func versionLess(a, b string) bool {
 		}
 	}
 	return len(pa) < len(pb)
+}
+
+func jsonIndent(v any) ([]byte, error) {
+	raw, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
 }
 
 func joinVersions(entries []catalogEntry) string {
